@@ -1,5 +1,7 @@
 ﻿using System.Numerics;
+using NoiseDotNet;
 using Raylib_cs;
+using RayMarcher;
 
 const int mapWidth = 32 * 2;
 const int mapHeight = 16 * 2;
@@ -11,17 +13,26 @@ const int chunkMapWidth = mapWidth / chunkSize;
 const int chunkMapHeight = mapHeight / chunkSize;
 const int chunkMapDepth = mapDepth / chunkSize;
 
+var voxels = new byte[mapWidth * mapHeight * mapDepth];
+var chunks = new bool[chunkMapWidth * chunkMapHeight * chunkMapDepth];
 
-byte[] voxels = new byte[mapWidth * mapHeight * mapDepth];
-bool[] chunks = new bool[chunkMapWidth * chunkMapHeight * chunkMapDepth];
 
-int Index(int x, int y, int z) => x + y * mapWidth + z * mapWidth * mapHeight;
-int ChunkIndex(int x, int y, int z) => x + y * chunkMapWidth + z * chunkMapWidth * chunkMapHeight;
+int Index(int x, int y, int z)
+{
+    return x + y * mapWidth + z * mapWidth * mapHeight;
+}
 
-bool InBounds(int x, int y, int z) =>
-    x >= 0 && x < mapWidth &&
-    y >= 0 && y < mapHeight &&
-    z >= 0 && z < mapDepth;
+int ChunkIndex(int x, int y, int z)
+{
+    return x + y * chunkMapWidth + z * chunkMapWidth * chunkMapHeight;
+}
+
+bool InBounds(int x, int y, int z)
+{
+    return x >= 0 && x < mapWidth &&
+           y >= 0 && y < mapHeight &&
+           z >= 0 && z < mapDepth;
+}
 
 bool IsSolid(int x, int y, int z)
 {
@@ -31,36 +42,65 @@ bool IsSolid(int x, int y, int z)
 
 void GenerateTestMap()
 {
-    for (int z = 0; z < mapDepth; z++)
+    // One noise sample per (x, z) column, batched the way NoiseDotNet wants: flat coordinate
+    // arrays in, flat output array out, rather than calling it per-voxel.
+    var columnCount = mapWidth * mapDepth;
+    var xCoords = new float[columnCount];
+    var zCoords = new float[columnCount];
+    var noise = new float[columnCount];
+
+    var idx = 0;
+    for (var z = 0; z < mapDepth; z++)
+    for (var x = 0; x < mapWidth; x++)
     {
-        for (int x = 0; x < mapWidth; x++)
+        xCoords[idx] = x;
+        zCoords[idx] = z;
+        idx++;
+    }
+
+    // Lower frequency = broader, smoother hills; higher = choppier terrain.
+    const float noiseFrequency = 0.05f;
+    const int noiseSeed = 1337;
+    var settings = new NoiseSettings(xFreq: noiseFrequency, yFreq: noiseFrequency, seed: noiseSeed);
+    Noise.GradientNoise2D(xCoords, zCoords, noise, settings);
+
+    // Ground sits around baseHeight, swinging +/- heightVariance with the noise.
+    const int baseHeight = mapHeight / 4;
+    const int heightVariance = mapHeight / 4;
+
+    idx = 0;
+    for (var z = 0; z < mapDepth; z++)
+    for (var x = 0; x < mapWidth; x++)
+    {
+        var groundHeight = baseHeight + (int)MathF.Round(noise[idx] * heightVariance);
+        groundHeight = Math.Clamp(groundHeight, 1, mapHeight - 2);
+        idx++;
+
+        for (var y = 0; y < mapHeight; y++)
         {
-            for (int y = 0; y < mapHeight; y++)
+            var solid = y <= groundHeight;
+
+            if (x == 0 || x == mapWidth - 1 || z == 0 || z == mapDepth - 1) solid = true;
+
+            if (solid)
             {
-                bool solid = false;
-
-                if (y == 0) solid = true;
-
-                // if (y == mapHeight - 1) solid = true;
-
-                if (x == 0 || x == mapWidth - 1 || z == 0 || z == mapDepth - 1) solid = true;
-
-                if (x == 10 && z == 10 && y < 5) solid = true;
-
-                if (solid)
-                {
-                    voxels[Index(x, y, z)] = 1;
-                    chunks[ChunkIndex(x / chunkSize, y / chunkSize, z / chunkSize)] = true;
-                }
+                voxels[Index(x, y, z)] = 1;
+                chunks[ChunkIndex(x / chunkSize, y / chunkSize, z / chunkSize)] = true;
             }
         }
     }
 }
 
 
-Vector3 playerPos = new Vector3(mapWidth / 2f, 12f, mapDepth / 2f);
-float yaw = 0f;
-float pitch = 0f;
+GenerateTestMap();
+
+var spawnX = mapWidth / 2;
+var spawnZ = mapDepth / 2;
+var spawnY = mapHeight - 1;
+while (spawnY > 0 && !IsSolid(spawnX, spawnY, spawnZ)) spawnY--;
+var playerPos = new Vector3(spawnX, spawnY + 3f, spawnZ);
+var yaw = 0f;
+var pitch = 0f;
 var maxPitch = MathF.PI / 2f - 0.01f;
 
 
@@ -70,44 +110,45 @@ const float lookSpeed = 2f;
 
 const int screenWidth = 640 * 2;
 const int screenHeight = 360 * 2;
-const int renderWidth = 640;
-const int renderHeight = 360;
+const int renderWidth = 640 / 2;
+const int renderHeight = 360 / 2;
 
 
-Color[] pixelBuffer = new Color[renderWidth * renderHeight];
+var pixelBuffer = new Color[renderWidth * renderHeight];
 
-GenerateTestMap();
+var test = voxels.Count(v => v != 0);
+var octree = Octree.Build(new VoxelMap(voxels, mapWidth, mapHeight, mapDepth));
 
-Raylib.InitWindow(screenWidth, screenHeight, "RayMarcher");
+Raylib.InitWindow(screenWidth, screenHeight, "Raymarcher practice");
 Raylib.DisableCursor();
 Raylib.SetTargetFPS(60);
 
 
-Image blankImage = Raylib.GenImageColor(renderWidth, renderHeight, Color.Black);
-Texture2D frameTexture = Raylib.LoadTextureFromImage(blankImage);
+var blankImage = Raylib.GenImageColor(renderWidth, renderHeight, Color.Black);
+var frameTexture = Raylib.LoadTextureFromImage(blankImage);
 Raylib.SetTextureFilter(frameTexture, TextureFilter.Point);
 Raylib.UnloadImage(blankImage);
 
 
 while (!Raylib.WindowShouldClose())
 {
-    float dt = Raylib.GetFrameTime();
+    var dt = Raylib.GetFrameTime();
 
-    float fX = (float)(Math.Cos(pitch) * Math.Sin(yaw));
-    float fY = (float)(Math.Sin(pitch));
-    float fZ = (float)(Math.Cos(pitch) * Math.Cos(yaw));
-    Vector3 forward = new Vector3(fX, fY, fZ);
+    var fX = (float)(Math.Cos(pitch) * Math.Sin(yaw));
+    var fY = (float)Math.Sin(pitch);
+    var fZ = (float)(Math.Cos(pitch) * Math.Cos(yaw));
+    var forward = new Vector3(fX, fY, fZ);
     var right = Vector3.Cross(forward, Vector3.UnitY);
     var up = Vector3.Cross(right, forward);
 
-    Vector2 mouseDelta = Raylib.GetMouseDelta();
+    var mouseDelta = Raylib.GetMouseDelta();
     yaw -= mouseDelta.X * 0.01f;
     pitch -= mouseDelta.Y * 0.01f;
     pitch = Math.Clamp(pitch, -maxPitch, maxPitch);
 
     if (Raylib.IsKeyDown(KeyboardKey.W))
     {
-        Vector3 next = playerPos + forward * (moveSpeed * dt);
+        var next = playerPos + forward * (moveSpeed * dt);
         if (!IsSolid((int)next.X, (int)playerPos.Y, (int)playerPos.Z)) playerPos.X = next.X;
         if (!IsSolid((int)playerPos.X, (int)next.Y, (int)playerPos.Z)) playerPos.Y = next.Y;
         if (!IsSolid((int)playerPos.X, (int)playerPos.Y, (int)next.Z)) playerPos.Z = next.Z;
@@ -115,7 +156,7 @@ while (!Raylib.WindowShouldClose())
 
     if (Raylib.IsKeyDown(KeyboardKey.S))
     {
-        Vector3 next = playerPos - forward * (moveSpeed * dt);
+        var next = playerPos - forward * (moveSpeed * dt);
         if (!IsSolid((int)next.X, (int)playerPos.Y, (int)playerPos.Z)) playerPos.X = next.X;
         if (!IsSolid((int)playerPos.X, (int)next.Y, (int)playerPos.Z)) playerPos.Y = next.Y;
         if (!IsSolid((int)playerPos.X, (int)playerPos.Y, (int)next.Z)) playerPos.Z = next.Z;
@@ -131,15 +172,9 @@ while (!Raylib.WindowShouldClose())
         // TODO: strafe right
     }
 
-    if (Raylib.IsKeyDown(KeyboardKey.Right))
-    {
-        yaw -= lookSpeed * dt;
-    }
+    if (Raylib.IsKeyDown(KeyboardKey.Right)) yaw -= lookSpeed * dt;
 
-    if (Raylib.IsKeyDown(KeyboardKey.Left))
-    {
-        yaw += lookSpeed * dt;
-    }
+    if (Raylib.IsKeyDown(KeyboardKey.Left)) yaw += lookSpeed * dt;
 
     if (Raylib.IsKeyDown(KeyboardKey.Up))
     {
@@ -153,108 +188,73 @@ while (!Raylib.WindowShouldClose())
         pitch = Math.Clamp(pitch, -maxPitch, maxPitch);
     }
 
-    float playerX = playerPos.X;
-    float playerY = playerPos.Y;
-    float playerZ = playerPos.Z;
+    var playerX = playerPos.X;
+    var playerY = playerPos.Y;
+    var playerZ = playerPos.Z;
 
-    Parallel.For(0, renderHeight, py =>
+    Parallel.For((long)0, renderHeight, py =>
     {
         var cameraY = 2.0f * py / renderHeight - 1f;
-        for (int px = 0; px < renderWidth; px++)
+        var nodeBuffer = new NodeBuffer(octree.MaxDepth);
+        nodeBuffer.AppendNode(octree.Root);
+        for (var px = 0; px < renderWidth; px++)
         {
             var cameraX = 2.0f * px / renderWidth - 1f;
 
             var rayDir = forward + right * cameraX + up * -cameraY;
 
-            int mapX = (int)playerX;
-            int mapY = (int)playerY;
-            int mapZ = (int)playerZ;
+            var currentRayPos = playerPos;
+            var rayOrigin = playerPos;
 
-            int chunkMapX = mapX / chunkSize;
-            int chunkMapY = mapY / chunkSize;
-            int chunkMapZ = mapZ / chunkSize;
+            int rayDirSignX = rayDir.X < 0 ? -1 : 1;
+            int rayDirSignY = rayDir.Y < 0 ? -1 : 1;
+            int rayDirSignZ = rayDir.Z < 0 ? -1 : 1;
 
-            int chunkMinX = chunkMapX * chunkSize;
-            int chunkMaxX = chunkMinX + chunkSize;
-            int chunkMinY = chunkMapY * chunkSize;
-            int chunkMaxY = chunkMinY + chunkSize;
-            int chunkMinZ = chunkMapZ * chunkSize;
-            int chunkMaxZ = chunkMinZ + chunkSize;
+            var hit = false;
+            var side = 0;
+            var safety = 0;
+            var epsilon = 0.0001f;
 
-            float deltaDistX = MathF.Abs(1f / rayDir.X);
-            float deltaDistY = MathF.Abs(1f / rayDir.Y);
-            float deltaDistZ = MathF.Abs(1f / rayDir.Z);
+            Vector3 trueRayPos = currentRayPos;
 
-            float deltaChunkDistX = MathF.Abs((float)chunkSize / rayDir.X);
-            float deltaChunkDistY = MathF.Abs((float)chunkSize / rayDir.Y);
-            float deltaChunkDistZ = MathF.Abs((float)chunkSize / rayDir.Z);
-
-            int stepX, stepY, stepZ;
-            float sideDistX, sideDistY, sideDistZ;
-
-            float sideChunkDistX, sideChunkDistY, sideChunkDistZ;
-
-            if (rayDir.X < 0)
+            while (!hit && safety++ < 100)
             {
-                stepX = -1;
-                sideDistX = (playerX - mapX) * deltaDistX;
-                sideChunkDistX = (playerX - chunkMinX) * deltaDistX;
-            }
-            else
-            {
-                stepX = 1;
-                sideDistX = (mapX + 1f - playerX) * deltaDistX;
-                sideChunkDistX = (chunkMaxX - playerX) * deltaDistX;
-            }
-
-            if (rayDir.Y < 0)
-            {
-                stepY = -1;
-                sideDistY = (playerY - mapY) * deltaDistY;
-                sideChunkDistY = (playerY - chunkMinY) * deltaDistY;
-            }
-            else
-            {
-                stepY = 1;
-                sideDistY = (mapY + 1f - playerY) * deltaDistY;
-                sideChunkDistY = (chunkMaxY - playerY) * deltaDistY;
-            }
-
-            if (rayDir.Z < 0)
-            {
-                stepZ = -1;
-                sideDistZ = (playerZ - mapZ) * deltaDistZ;
-                sideChunkDistZ = (playerZ - chunkMinZ) * deltaDistZ;
-            }
-            else
-            {
-                stepZ = 1;
-                sideDistZ = (mapZ + 1f - playerZ) * deltaDistZ;
-                sideChunkDistZ = (chunkMaxZ - playerZ) * deltaDistZ;
-            }
-
-            bool chunkIsOccupied = chunks[ChunkIndex(chunkMapX, chunkMapY, chunkMapZ)];
-            bool hit = false;
-            int side = 0;
-            int safety = 0;
-
-            while (!hit && safety < 40)
-            {
-                if (chunkIsOccupied)
+                if (octree.IsOutOfBounds(currentRayPos))
                 {
-                    safety++;
+                    break;
+                }
+
+                Node.Climb(ref nodeBuffer, currentRayPos);
+                var currentNode = Node.Descend(ref nodeBuffer, currentRayPos);
+
+                if (currentNode.State == NodeState.OutOfBounds) break;
+
+                if (currentNode.State == NodeState.Solid)
+                {
+                    hit = true;
+                    continue;
+                }
+
+                if (currentNode.State == NodeState.Empty)
+                {
+                    var boundaryX = (rayDirSignX == 1 ? currentNode.Max : currentNode.Min).X;
+                    var boundaryY = (rayDirSignY == 1 ? currentNode.Max : currentNode.Min).Y;
+                    var boundaryZ = (rayDirSignZ == 1 ? currentNode.Max : currentNode.Min).Z;
+
+                    var sideDistX = (boundaryX - currentRayPos.X) / rayDir.X;
+                    var sideDistY = (boundaryY - currentRayPos.Y) / rayDir.Y;
+                    var sideDistZ = (boundaryZ - currentRayPos.Z) / rayDir.Z;
+
                     if (sideDistX < sideDistY)
                     {
                         if (sideDistX < sideDistZ)
                         {
-                            sideDistX += deltaDistX;
-                            mapX += stepX;
+                            currentRayPos += rayDir * sideDistX;
                             side = 0;
                         }
                         else
                         {
-                            sideDistZ += deltaDistZ;
-                            mapZ += stepZ;
+                            currentRayPos += rayDir * sideDistZ;
                             side = 2;
                         }
                     }
@@ -262,154 +262,28 @@ while (!Raylib.WindowShouldClose())
                     {
                         if (sideDistY < sideDistZ)
                         {
-                            sideDistY += deltaDistY;
-                            mapY += stepY;
+                            currentRayPos += rayDir * sideDistY;
                             side = 1;
                         }
                         else
                         {
-                            sideDistZ += deltaDistZ;
-                            mapZ += stepZ;
+                            currentRayPos += rayDir * sideDistZ;
                             side = 2;
                         }
                     }
 
-                    if (mapX >= chunkMaxX || mapY >= chunkMaxY || mapZ >= chunkMaxZ || mapX < chunkMinX ||
-                        mapY < chunkMinY || mapZ < chunkMinZ)
+                    trueRayPos = currentRayPos;
+
+                    switch (side)
                     {
-                        if (mapX < 0 || mapX >= mapWidth || mapY < 0 || mapY >= mapHeight || mapZ < 0 ||
-                            mapZ >= mapDepth) break;
-                        chunkMapX = mapX / chunkSize;
-                        chunkMapY = mapY / chunkSize;
-                        chunkMapZ = mapZ / chunkSize;
-
-                        chunkMinX = chunkMapX * chunkSize;
-                        chunkMaxX = chunkMinX + chunkSize;
-                        chunkMinY = chunkMapY * chunkSize;
-                        chunkMaxY = chunkMinY + chunkSize;
-                        chunkMinZ = chunkMapZ * chunkSize;
-                        chunkMaxZ = chunkMinZ + chunkSize;
-
-                        if (stepX == -1)
-                        {
-                            sideChunkDistX = (playerX - chunkMinX) * deltaDistX;
-                        }
-                        else
-                        {
-                            sideChunkDistX = (chunkMaxX - playerX) * deltaDistX;
-                        }
-
-                        if (stepY == -1)
-                        {
-                            sideChunkDistY = (playerY - chunkMinY) * deltaDistY;
-                        }
-                        else
-                        {
-                            sideChunkDistY = (chunkMaxY - playerY) * deltaDistY;
-                        }
-
-                        if (stepZ == -1)
-                        {
-                            sideChunkDistZ = (playerZ - chunkMinZ) * deltaDistZ;
-                        }
-                        else
-                        {
-                            sideChunkDistZ = (chunkMaxZ - playerZ) * deltaDistZ;
-                        }
-
-                        chunkIsOccupied = chunks[ChunkIndex(chunkMapX, chunkMapY, chunkMapZ)];
+                        case 0: currentRayPos.X += rayDirSignX * epsilon; break;
+                        case 1: currentRayPos.Y += rayDirSignY * epsilon; break;
+                        case 2: currentRayPos.Z += rayDirSignZ * epsilon; break;
                     }
                 }
-                else
-                {
-                    safety += 4;
-                    if (sideChunkDistX < sideChunkDistY)
-                    {
-                        if (sideChunkDistX < sideChunkDistZ)
-                        {
-                            sideChunkDistX += deltaChunkDistX;
-                            chunkMapX += stepX;
-                            side = 0;
-                        }
-                        else
-                        {
-                            sideChunkDistZ += deltaChunkDistZ;
-                            chunkMapZ += stepZ;
-                            side = 2;
-                        }
-                    }
-                    else
-                    {
-                        if (sideChunkDistY < sideChunkDistZ)
-                        {
-                            sideChunkDistY += deltaChunkDistY;
-                            chunkMapY += stepY;
-                            side = 1;
-                        }
-                        else
-                        {
-                            sideChunkDistZ += deltaChunkDistZ;
-                            chunkMapZ += stepZ;
-                            side = 2;
-                        }
-                    }
-
-                    chunkMinX = chunkMapX * chunkSize;
-                    chunkMaxX = chunkMinX + chunkSize;
-                    chunkMinY = chunkMapY * chunkSize;
-                    chunkMaxY = chunkMinY + chunkSize;
-                    chunkMinZ = chunkMapZ * chunkSize;
-                    chunkMaxZ = chunkMinZ + chunkSize;
-
-                    if (side == 0)
-                    {
-                        if (stepX == 1)
-                        {
-                            mapX = chunkMinX;
-                            sideDistX = (mapX + 1f - playerX) * deltaDistX;
-                        }
-                        else
-                        {
-                            mapX = chunkMaxX - 1;
-                            sideDistX = (playerX - mapX) * deltaDistX;
-                        }
-                    }
-
-                    if (side == 1)
-                    {
-                        if (stepY == 1)
-                        {
-                            mapY = chunkMinY;
-                            sideDistY = (mapY + 1f - playerY) * deltaDistY;
-                        }
-                        else
-                        {
-                            mapY = chunkMaxY - 1;
-                            sideDistY = (playerY - mapY) * deltaDistY;
-                        }
-                    }
-
-                    if (side == 2)
-                    {
-                        if (stepZ == 1)
-                        {
-                            mapZ = chunkMinZ;
-                            sideDistZ = (mapZ + 1f - playerZ) * deltaDistZ;
-                        }
-                        else
-                        {
-                            mapZ = chunkMaxZ - 1;
-                            sideDistZ = (playerZ - mapZ) * deltaDistZ;
-                        }
-                    }
-
-                    if (mapX < 0 || mapX >= mapWidth || mapY < 0 || mapY >= mapHeight || mapZ < 0 ||
-                        mapZ >= mapDepth) break;
-                    chunkIsOccupied = chunks[ChunkIndex(chunkMapX, chunkMapY, chunkMapZ)];
-                }
-
-                if (IsSolid(mapX, mapY, mapZ)) hit = true;
             }
+
+            nodeBuffer.Reset();
 
             if (!hit)
             {
@@ -417,17 +291,17 @@ while (!Raylib.WindowShouldClose())
                 continue;
             }
 
-            float perpWallDist = side switch
+            var perpWallDist = side switch
             {
-                0 => (mapX - playerX + (1 - stepX) / 2f) / rayDir.X,
-                1 => (mapY - playerY + (1 - stepY) / 2f) / rayDir.Y,
-                2 => (mapZ - playerZ + (1 - stepZ) / 2f) / rayDir.Z,
+                0 => (trueRayPos.X - rayOrigin.X) / rayDir.X,
+                1 => (trueRayPos.Y - rayOrigin.Y) / rayDir.Y,
+                2 => (trueRayPos.Z - rayOrigin.Z) / rayDir.Z,
                 _ => throw new InvalidOperationException("Invalid side")
             };
 
-            byte shade = (byte)Math.Clamp(255 - perpWallDist * 25, 40, 255);
+            var shade = (byte)Math.Clamp(255 - perpWallDist * 25, 40, 255);
 
-            Color color = side switch
+            var color = side switch
             {
                 0 => new Color(shade, shade, shade, (byte)255),
                 1 => new Color((byte)(shade * 0.7f), (byte)(shade * 0.7f), (byte)(shade * 0.7f), (byte)255),
@@ -436,10 +310,7 @@ while (!Raylib.WindowShouldClose())
             };
 
 
-            if (py == 200 && px == 300)
-            {
-                color = new Color(0f, shade, 0f, (byte)255);
-            }
+            if (py == 200 && px == 300) color = new Color(0f, shade, 0f, 255);
 
             pixelBuffer[px + py * renderWidth] = color;
         }
