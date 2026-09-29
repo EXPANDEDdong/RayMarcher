@@ -1,0 +1,7 @@
+﻿services:
+  raymarcher:
+    image: raymarcher
+    build:
+      context: .
+      dockerfile: RayMarcher/Dockerfile
+
