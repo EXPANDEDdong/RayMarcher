@@ -7,24 +7,11 @@ const int mapWidth = 32 * 2;
 const int mapHeight = 16 * 2;
 const int mapDepth = 32 * 2;
 
-const int chunkSize = 4;
-
-const int chunkMapWidth = mapWidth / chunkSize;
-const int chunkMapHeight = mapHeight / chunkSize;
-const int chunkMapDepth = mapDepth / chunkSize;
-
 var voxels = new byte[mapWidth * mapHeight * mapDepth];
-var chunks = new bool[chunkMapWidth * chunkMapHeight * chunkMapDepth];
-
 
 int Index(int x, int y, int z)
 {
     return x + y * mapWidth + z * mapWidth * mapHeight;
-}
-
-int ChunkIndex(int x, int y, int z)
-{
-    return x + y * chunkMapWidth + z * chunkMapWidth * chunkMapHeight;
 }
 
 bool InBounds(int x, int y, int z)
@@ -42,8 +29,6 @@ bool IsSolid(int x, int y, int z)
 
 void GenerateTestMap()
 {
-    // One noise sample per (x, z) column, batched the way NoiseDotNet wants: flat coordinate
-    // arrays in, flat output array out, rather than calling it per-voxel.
     var columnCount = mapWidth * mapDepth;
     var xCoords = new float[columnCount];
     var zCoords = new float[columnCount];
@@ -58,13 +43,11 @@ void GenerateTestMap()
         idx++;
     }
 
-    // Lower frequency = broader, smoother hills; higher = choppier terrain.
     const float noiseFrequency = 0.05f;
     const int noiseSeed = 1337;
     var settings = new NoiseSettings(xFreq: noiseFrequency, yFreq: noiseFrequency, seed: noiseSeed);
     Noise.GradientNoise2D(xCoords, zCoords, noise, settings);
 
-    // Ground sits around baseHeight, swinging +/- heightVariance with the noise.
     const int baseHeight = mapHeight / 4;
     const int heightVariance = mapHeight / 4;
 
@@ -80,12 +63,11 @@ void GenerateTestMap()
         {
             var solid = y <= groundHeight;
 
-            if (x == 0 || x == mapWidth - 1 || z == 0 || z == mapDepth - 1) solid = true;
+            if (x == 0 || x == mapWidth - 1 || z == 0 || z == mapDepth - 1/*|| y == mapHeight - 1*/) solid = true;
 
             if (solid)
             {
                 voxels[Index(x, y, z)] = 1;
-                chunks[ChunkIndex(x / chunkSize, y / chunkSize, z / chunkSize)] = true;
             }
         }
     }
@@ -96,7 +78,7 @@ GenerateTestMap();
 
 var spawnX = mapWidth / 2;
 var spawnZ = mapDepth / 2;
-var spawnY = mapHeight - 1;
+var spawnY = mapHeight - 10;
 while (spawnY > 0 && !IsSolid(spawnX, spawnY, spawnZ)) spawnY--;
 var playerPos = new Vector3(spawnX, spawnY + 3f, spawnZ);
 var yaw = 0f;
@@ -116,10 +98,10 @@ const int renderHeight = 360 / 2;
 
 var pixelBuffer = new Color[renderWidth * renderHeight];
 
-var test = voxels.Count(v => v != 0);
-var octree = Octree.Build(new VoxelMap(voxels, mapWidth, mapHeight, mapDepth));
+var voxelMap = new VoxelMap(voxels, mapWidth, mapHeight, mapDepth);
+var octree = Octree.Create(ref voxelMap);
 
-Raylib.InitWindow(screenWidth, screenHeight, "Raymarcher practice");
+Raylib.InitWindow(screenWidth, screenHeight, "RayMarcher");
 Raylib.DisableCursor();
 Raylib.SetTargetFPS(60);
 
@@ -140,7 +122,7 @@ while (!Raylib.WindowShouldClose())
     var forward = new Vector3(fX, fY, fZ);
     var right = Vector3.Cross(forward, Vector3.UnitY);
     var up = Vector3.Cross(right, forward);
-
+    
     var mouseDelta = Raylib.GetMouseDelta();
     yaw -= mouseDelta.X * 0.01f;
     pitch -= mouseDelta.Y * 0.01f;
@@ -188,15 +170,12 @@ while (!Raylib.WindowShouldClose())
         pitch = Math.Clamp(pitch, -maxPitch, maxPitch);
     }
 
-    var playerX = playerPos.X;
-    var playerY = playerPos.Y;
-    var playerZ = playerPos.Z;
-
     Parallel.For((long)0, renderHeight, py =>
     {
         var cameraY = 2.0f * py / renderHeight - 1f;
-        var nodeBuffer = new NodeBuffer(octree.MaxDepth);
-        nodeBuffer.AppendNode(octree.Root);
+        Span<TreeBranch> branchBuffer = stackalloc TreeBranch[octree.MaxDepth + 1];
+        branchBuffer[0] = TreeBranch.Create(0, 0, 0, 0, 0);
+        var climber = new TreeClimber(branchBuffer, octree.OneSideLength);
         for (var px = 0; px < renderWidth; px++)
         {
             var cameraX = 2.0f * px / renderWidth - 1f;
@@ -205,28 +184,25 @@ while (!Raylib.WindowShouldClose())
 
             var currentRayPos = playerPos;
             var rayOrigin = playerPos;
-
+            
             int rayDirSignX = rayDir.X < 0 ? -1 : 1;
             int rayDirSignY = rayDir.Y < 0 ? -1 : 1;
             int rayDirSignZ = rayDir.Z < 0 ? -1 : 1;
-
+            
             var hit = false;
             var side = 0;
             var safety = 0;
-            var epsilon = 0.0001f;
+            const float epsilon = 0.0001f;
 
             Vector3 trueRayPos = currentRayPos;
 
             while (!hit && safety++ < 100)
             {
-                if (octree.IsOutOfBounds(currentRayPos))
-                {
-                    break;
-                }
-
-                Node.Climb(ref nodeBuffer, currentRayPos);
-                var currentNode = Node.Descend(ref nodeBuffer, currentRayPos);
-
+                if (!InBounds((int)currentRayPos.X, (int)currentRayPos.Y, (int)currentRayPos.Z)) break;
+                //climber.Climb(currentRayPos);
+                var (currentNode, nodeBranch) = climber.Descend(octree, currentRayPos);
+                var sideLength = (int)octree.OneSideLength >> nodeBranch.Depth;
+                
                 if (currentNode.State == NodeState.OutOfBounds) break;
 
                 if (currentNode.State == NodeState.Solid)
@@ -234,17 +210,18 @@ while (!Raylib.WindowShouldClose())
                     hit = true;
                     continue;
                 }
-
+                
                 if (currentNode.State == NodeState.Empty)
                 {
-                    var boundaryX = (rayDirSignX == 1 ? currentNode.Max : currentNode.Min).X;
-                    var boundaryY = (rayDirSignY == 1 ? currentNode.Max : currentNode.Min).Y;
-                    var boundaryZ = (rayDirSignZ == 1 ? currentNode.Max : currentNode.Min).Z;
+                    (int X, int Y, int Z) max = (nodeBranch.X + sideLength, nodeBranch.Y + sideLength, nodeBranch.Z + sideLength);
+                    var boundaryX = (rayDirSignX == 1 ? max : (nodeBranch.X, nodeBranch.Y, nodeBranch.Z)).X;
+                    var boundaryY = (rayDirSignY == 1 ? max : (nodeBranch.X, nodeBranch.Y, nodeBranch.Z)).Y;
+                    var boundaryZ = (rayDirSignZ == 1 ? max : (nodeBranch.X, nodeBranch.Y, nodeBranch.Z)).Z;
 
                     var sideDistX = (boundaryX - currentRayPos.X) / rayDir.X;
                     var sideDistY = (boundaryY - currentRayPos.Y) / rayDir.Y;
                     var sideDistZ = (boundaryZ - currentRayPos.Z) / rayDir.Z;
-
+                    
                     if (sideDistX < sideDistY)
                     {
                         if (sideDistX < sideDistZ)
@@ -271,9 +248,8 @@ while (!Raylib.WindowShouldClose())
                             side = 2;
                         }
                     }
-
                     trueRayPos = currentRayPos;
-
+                    
                     switch (side)
                     {
                         case 0: currentRayPos.X += rayDirSignX * epsilon; break;
@@ -282,8 +258,6 @@ while (!Raylib.WindowShouldClose())
                     }
                 }
             }
-
-            nodeBuffer.Reset();
 
             if (!hit)
             {

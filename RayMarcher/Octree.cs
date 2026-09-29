@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace RayMarcher;
 
@@ -52,7 +52,7 @@ internal readonly struct VoxelMap(byte[] voxelMap, int width, int height, int de
 }
 
 [Flags]
-internal enum NodeState
+internal enum NodeState : byte
 {
     None = 0,
 
@@ -66,122 +66,57 @@ internal enum NodeState
     OutOfBounds = 4
 }
 
-internal class Node(Vector3 min, Vector3 max, NodeState state, Node[]? children, bool isLeaf)
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.Empty, byte materialId = 0, ushort extraData = 0)
 {
-    public Vector3 Min { get; set; } = min;
-    public Vector3 Max { get; set; } = max;
-    public Vector3 Center => (Min + Max) * 0.5f;
-
-    public Node[]? Children { get; set; } = children;
-    public NodeState State { get; set; } = state;
-
-    public bool IsLeaf { get; set; } = isLeaf;
-
-    public static Node BuildNode(Vector3 min, Vector3 max, VoxelMap voxelMap)
+    public uint ChildStartIndex { get; } = childStartIndex; // 4 bytes
+    public NodeState State { get; } = state; // 1 byte
+    public byte MaterialId { get; } = materialId; // 1 byte
+    public ushort ExtraData { get; } = extraData; // 2 bytes
+    
+    public static Node Empty => new(0, NodeState.None);
+    
+    public Octant GetOctant((int x, int y, int z) min, uint sideLength, Vector3 point)
     {
+        var center = (min.x + sideLength/2, min.y + sideLength/2, min.z + sideLength/2);
+        var result = Octant.None;
+        if (point.X >= center.Item1) result |= Octant.PositiveX;
+        if (point.Y >= center.Item2) result |= Octant.PositiveY;
+        if (point.Z >= center.Item3) result |= Octant.PositiveZ;
+        return result;
+    }
+
+    public static void BuildNode(int nodeIndex, ref int currentTreeIndex, List<Node> nodes, ref VoxelMap voxelMap, (int x, int y, int z) min, int sideLength)
+    {
+        var childrenLength = sideLength / 2;
         var state = NodeState.None;
-        var (maxX, maxY, maxZ) = ((int)max.X, (int)max.Y, (int)max.Z);
-        var (minX, minY, minZ) = ((int)min.X, (int)min.Y, (int)min.Z);
-
-        CheckUniformity(ref state, minX, minY, minZ, maxX, maxY, maxZ, voxelMap.IsSolid);
-
+        CheckUniformity(ref state, min.x, min.y, min.z, min.x + sideLength, min.y + sideLength, min.z + sideLength, voxelMap.IsSolid);
+        
         if (state == NodeState.Empty || state == NodeState.Solid)
-            return new Node(min, max, state, null, true);
-
-        var node = new Node(min, max, NodeState.Mixed, new Node[8], false);
-
-        var center = node.Center;
-
-        for (var child = 0; child < 8; child++)
         {
-            var (childMin, childMax) = CalculateOctantBounds((Octant)child, min, center, max);
-            var childNode = BuildNode(childMin, childMax, voxelMap);
-
-            Debug.Assert(node.Children != null);
-            node.Children[child] = childNode;
-        }
-
-        return node;
-    }
-
-    public Node FindNodeContaining(Vector3 point)
-    {
-        if (IsLeaf || Children == null)
-        {
-            return this;
-        }
-        var child = Children[(int)GetOctant(point)];
-        return child.FindNodeContaining(point);
-    }
-
-    public static void Climb(ref NodeBuffer buffer, Vector3 point)
-    {
-        int index = buffer.ValidCount - 1;
-        int startIndex = buffer.ValidCount - 1;
-        Node current = buffer.Nodes[index];
-        if (current.IsPointNodeWithinBounds(point))
-        {
+            var material = state switch
+            {
+                NodeState.Solid => (byte)1,
+                _ => (byte)0
+            };
+            nodes[nodeIndex] = new Node(0, state, material);
             return;
         }
-        while (!current.IsPointNodeWithinBounds(point))
+        
+        var childStartIndex = currentTreeIndex;
+        currentTreeIndex += 8;
+        
+        var node = new Node((uint)childStartIndex, NodeState.Mixed);
+        nodes[nodeIndex] = node;
+        nodes.AddRange(Enumerable.Repeat(Empty, 8));
+
+        for (int i = 0; i < 8; i++)
         {
-            if (index == 0)
-            {
-                break;
-            }
-
-            index -= 1;
-            current = buffer.Nodes[index];
+            var octantMin = CalculateOctantBounds((Octant)i, min, childrenLength);
+            BuildNode(childStartIndex + i, ref currentTreeIndex, nodes, ref voxelMap, octantMin, childrenLength);
         }
-
-        int levelsClimbed = startIndex - index;
-        buffer.ValidCount = index + 1;
-    }
-
-    public static Node Descend(ref NodeBuffer buffer, Vector3 point)
-    {
-        int index = buffer.ValidCount - 1;
-        Node current = buffer.Nodes[index];
-        while (!current.IsLeaf)
-        {
-            current = DescendToChildContaining(current, point);
-            buffer.AppendNode(current);
-        }
-        return current;
-    }
-
-    public static Node DescendToChildContaining(Node node, Vector3 point)
-    {
-        Debug.Assert(node.Children != null);
-        return node.Children[(int)Node.GetOctant(node, point)];
     }
     
-    public static Octant GetOctant(Node node, Vector3 point)
-    {
-        var result = Octant.None;
-        if (point.X >= node.Center.X) result |= Octant.PositiveX;
-        if (point.Y >= node.Center.Y) result |= Octant.PositiveY;
-        if (point.Z >= node.Center.Z) result |= Octant.PositiveZ;
-        return result;
-    }
-
-    public bool IsPointNodeWithinBounds(Vector3 point)
-    {
-        return point.X >= Min.X && point.X <= Max.X &&
-               point.Y >= Min.Y && point.Y <= Max.Y &&
-               point.Z >= Min.Z && point.Z <= Max.Z;
-    }
-    
-
-    private Octant GetOctant(Vector3 point)
-    {
-        var result = Octant.None;
-        if (point.X >= Center.X) result |= Octant.PositiveX;
-        if (point.Y >= Center.Y) result |= Octant.PositiveY;
-        if (point.Z >= Center.Z) result |= Octant.PositiveZ;
-        return result;
-    }
-
     private static void CheckUniformity(ref NodeState state, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
         Func<int, int, int, bool> isSolid)
     {
@@ -197,88 +132,109 @@ internal class Node(Vector3 min, Vector3 max, NodeState state, Node[]? children,
                 state |= NodeState.EmptyVoxelFound;
         }
     }
-
-    private static (Vector3 min, Vector3 max) CalculateOctantBounds(Octant octant, Vector3 min, Vector3 center,
-        Vector3 max)
+    
+    public static (int x, int y, int z) CalculateOctantBounds(Octant octant, (int x, int y, int z) min, int sideLength)
     {
-        var octantMinimum = Vector3.Zero;
-        var octantMaximum = Vector3.Zero;
+        (int x, int y, int z) octantMinimum = (0, 0, 0);
 
         var hasPositiveX = (octant & Octant.PositiveX) != 0;
         var hasPositiveY = (octant & Octant.PositiveY) != 0;
         var hasPositiveZ = (octant & Octant.PositiveZ) != 0;
 
-        octantMinimum.X = hasPositiveX ? center.X : min.X;
-        octantMaximum.X = hasPositiveX ? max.X : center.X;
-        octantMinimum.Y = hasPositiveY ? center.Y : min.Y;
-        octantMaximum.Y = hasPositiveY ? max.Y : center.Y;
-        octantMinimum.Z = hasPositiveZ ? center.Z : min.Z;
-        octantMaximum.Z = hasPositiveZ ? max.Z : center.Z;
+        octantMinimum.x = hasPositiveX ? min.x + sideLength : min.x;
+        octantMinimum.y = hasPositiveY ? min.y + sideLength : min.y;
+        octantMinimum.z = hasPositiveZ ? min.z + sideLength : min.z;
 
-        return (octantMinimum, octantMaximum);
+        return octantMinimum;
     }
-    
-    public static Node OutOfBounds => new Node(Vector3.Zero, Vector3.Zero, NodeState.OutOfBounds, null, true);
 }
 
-internal class Octree(Node root, int maxDepth)
+internal class Octree(Node[] nodes, uint oneSideLength)
 {
-    public Node Root { get; } = root;
-    
-    public int MaxDepth { get; } = maxDepth;
+    public Node[] Nodes { get; private set; } = nodes;
 
-    public Node FindNodeContaining(Vector3 point)
-    {
-        if (point.X > Root.Max.X || point.Y > Root.Max.Y || point.Z > Root.Max.Z || point.X < Root.Min.X || point.Y < Root.Min.Y || point.Z < Root.Min.Z)
-        {
-            return Node.OutOfBounds;
-        }
-        return Root.FindNodeContaining(point);
-    }
-
-    public bool IsOutOfBounds(Vector3 point)
-    {
-        return point.X > Root.Max.X || point.Y > Root.Max.Y || point.Z > Root.Max.Z || point.X < Root.Min.X || point.Y < Root.Min.Y || point.Z < Root.Min.Z;
-    }
+    public uint OneSideLength { get; private set; } = oneSideLength;
     
-    public static Octree Build(VoxelMap voxelMap)
+    public int MaxDepth => BitOperations.TrailingZeroCount(OneSideLength);
+
+    public static Octree Create(ref VoxelMap voxelMap)
     {
+        var nodes = new List<Node>();
+        
         uint longestDimension = Math.Max(voxelMap.Dimensions.height,
             Math.Max(voxelMap.Dimensions.width, voxelMap.Dimensions.depth));
         if (!BitOperations.IsPow2(longestDimension))
             longestDimension = BitOperations.RoundUpToPowerOf2(longestDimension);
         
-        var maxDepth = BitOperations.TrailingZeroCount(longestDimension);
-        var min = new Vector3(0, 0, 0);
-        var max = new Vector3(longestDimension, longestDimension, longestDimension);
-        var octree = new Octree(Node.BuildNode(min, max, voxelMap), maxDepth);
-        return octree;
+        var oneSideLength = longestDimension;
+
+        nodes.Add(Node.Empty);
+        var currentTreeIndex = 1;
+        
+        Node.BuildNode(0, ref currentTreeIndex, nodes, ref voxelMap, (0, 0, 0), (int)oneSideLength);
+        
+        if (nodes.Any(n => n.State == NodeState.None))
+        {
+            throw new ApplicationException("Some nodes are still None");
+        }
+        
+        return new Octree([.. nodes], oneSideLength);
     }
 }
 
-internal struct NodeBuffer(int maxDepth)
+internal readonly struct TreeBranch(int x, int y, int z, uint nodeIndex, byte depth)
 {
-    public Node[] Nodes { get; set; } = new Node[maxDepth + 1];
+    public int X { get; } = x;
+    public int Y { get; } = y;
+    public int Z { get; } = z;
+    public uint NodeIndex { get; } = nodeIndex;
+    public byte Depth { get; } = depth;
 
-    public int ValidCount { get; set; } = 0;
+    public static TreeBranch Create<T>(int x, int y, int z, uint nodeIndex, T depth) where T : INumber<T> => new(x, y, z, nodeIndex, byte.CreateTruncating(depth));
+}
+
+internal ref struct TreeClimber(Span<TreeBranch> branchBuffer, uint rootNodeSize)
+{
+    public Span<TreeBranch> BranchBuffer { get; } = branchBuffer;
+    public byte CurrentDepth { get; private set; }
     
-    public int MaxDepth => maxDepth;
+    private readonly uint _rootNodeSize = uint.CreateTruncating(rootNodeSize);
 
-    public void AppendNode(Node node)
+    public TreeBranch Climb(Vector3 point)
     {
-        ValidCount += 1;
-        Nodes[ValidCount - 1] = node;
-        
+        var currentBranch = BranchBuffer[CurrentDepth];
+        while (CurrentDepth > 0 && !ContainsPoint(currentBranch, point))
+        {
+            currentBranch = BranchBuffer[--CurrentDepth];
+        }
+        return currentBranch;
+    }
+    
+    public (Node, TreeBranch) Descend(Octree octree, Vector3 point)
+    {
+        CurrentDepth = 0;
+        var currentBranch = BranchBuffer[0];
+        var currentNode = octree.Nodes[currentBranch.NodeIndex];
+        while (currentNode.State == NodeState.Mixed)
+        {
+            var octant = currentNode.GetOctant((currentBranch.X, currentBranch.Y, currentBranch.Z), _rootNodeSize >> CurrentDepth++, point);
+            var (x, y, z) = Node.CalculateOctantBounds(octant, (currentBranch.X, currentBranch.Y, currentBranch.Z), (int)(_rootNodeSize >> CurrentDepth));
+            
+            var newNodeIndex = (int)(currentNode.ChildStartIndex + (int)octant);
+            var newBranch = TreeBranch.Create(x, y, z, (uint)newNodeIndex, CurrentDepth);
+            BranchBuffer[CurrentDepth] = newBranch;
+            currentBranch = newBranch;
+            currentNode = octree.Nodes[newNodeIndex];
+        }
+        return (currentNode, currentBranch);
     }
 
-    public Node ClimbOneStep()
+    private bool ContainsPoint(TreeBranch branch, Vector3 point)
     {
-        ValidCount -= 1;
-        return Nodes[ValidCount];
-    }
-    
-    public void Reset()
-    {
-        ValidCount = 1;
+        var branchNodeSize = _rootNodeSize >> branch.Depth;
+        var (maxX, maxY, maxZ) = (branch.X + (int)branchNodeSize, branch.Y + (int)branchNodeSize, branch.Z + (int)branchNodeSize);
+        return point.X >= branch.X && point.X < maxX &&
+               point.Y >= branch.Y && point.Y < maxY &&
+               point.Z >= branch.Z && point.Z < maxZ;
     }
 }
