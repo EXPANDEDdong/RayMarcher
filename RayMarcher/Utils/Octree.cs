@@ -1,10 +1,10 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 
-namespace RayMarcher;
+namespace RayMarcher.Utils;
 
 [Flags]
-internal enum Octant
+public enum Octant
 {
     None = 0,
 
@@ -22,7 +22,7 @@ internal enum Octant
     RightTopFront = PositiveX | PositiveY | PositiveZ // 7
 }
 
-internal readonly struct VoxelMap(byte[] voxelMap, int width, int height, int depth)
+public readonly struct VoxelMap(byte[] voxelMap, int width, int height, int depth)
 {
     private readonly ushort _mapHeight = (ushort)Math.Clamp(height, ushort.MinValue, ushort.MaxValue);
     private readonly ushort _mapWidth = (ushort)Math.Clamp(width, ushort.MinValue, ushort.MaxValue);
@@ -33,6 +33,8 @@ internal readonly struct VoxelMap(byte[] voxelMap, int width, int height, int de
         if (InBounds(x, y, z)) return this[x, y, z] != 0;
         return false;
     }
+    
+    public byte TextureFor(int x, int y, int z) => this[x, y, z];
 
     private bool InBounds(int x, int y, int z)
     {
@@ -52,7 +54,7 @@ internal readonly struct VoxelMap(byte[] voxelMap, int width, int height, int de
 }
 
 [Flags]
-internal enum NodeState : byte
+public enum NodeState : byte
 {
     None = 0,
 
@@ -67,7 +69,7 @@ internal enum NodeState : byte
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.Empty, byte materialId = 0, ushort extraData = 0)
+public readonly struct Node(uint childStartIndex, NodeState state = NodeState.Empty, byte materialId = 0, ushort extraData = 0)
 {
     public uint ChildStartIndex { get; } = childStartIndex; // 4 bytes
     public NodeState State { get; } = state; // 1 byte
@@ -90,13 +92,14 @@ internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.
     {
         var childrenLength = sideLength / 2;
         var state = NodeState.None;
-        CheckUniformity(ref state, min.x, min.y, min.z, min.x + sideLength, min.y + sideLength, min.z + sideLength, voxelMap.IsSolid);
+        byte materialId = 0;
+        CheckUniformity(ref state, ref materialId, min.x, min.y, min.z, min.x + sideLength, min.y + sideLength, min.z + sideLength, voxelMap.IsSolid, voxelMap.TextureFor);
         
         if (state == NodeState.Empty || state == NodeState.Solid)
         {
             var material = state switch
             {
-                NodeState.Solid => (byte)1,
+                NodeState.Solid => (byte)materialId,
                 _ => (byte)0
             };
             nodes[nodeIndex] = new Node(0, state, material);
@@ -117,8 +120,8 @@ internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.
         }
     }
     
-    private static void CheckUniformity(ref NodeState state, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
-        Func<int, int, int, bool> isSolid)
+    private static void CheckUniformity(ref NodeState state, ref byte materialId, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
+        Func<int, int, int, bool> isSolid, Func<int, int, int, byte> textureFor)
     {
         for (var x = minX; x < maxX; x++)
         for (var y = minY; y < maxY; y++)
@@ -127,7 +130,10 @@ internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.
             if (state == NodeState.Mixed) return;
 
             if (isSolid(x, y, z))
+            {
                 state |= NodeState.SolidVoxelFound;
+                materialId = textureFor(x, y, z);
+            }
             else
                 state |= NodeState.EmptyVoxelFound;
         }
@@ -149,7 +155,7 @@ internal readonly struct Node(uint childStartIndex, NodeState state = NodeState.
     }
 }
 
-internal class Octree(Node[] nodes, uint oneSideLength)
+public class Octree(Node[] nodes, uint oneSideLength)
 {
     public Node[] Nodes { get; private set; } = nodes;
 
@@ -182,7 +188,7 @@ internal class Octree(Node[] nodes, uint oneSideLength)
     }
 }
 
-internal readonly struct TreeBranch(int x, int y, int z, uint nodeIndex, byte depth)
+public readonly struct TreeBranch(int x, int y, int z, uint nodeIndex, byte depth)
 {
     public int X { get; } = x;
     public int Y { get; } = y;
@@ -193,7 +199,7 @@ internal readonly struct TreeBranch(int x, int y, int z, uint nodeIndex, byte de
     public static TreeBranch Create<T>(int x, int y, int z, uint nodeIndex, T depth) where T : INumber<T> => new(x, y, z, nodeIndex, byte.CreateTruncating(depth));
 }
 
-internal ref struct TreeClimber(Span<TreeBranch> branchBuffer, uint rootNodeSize)
+public ref struct TreeClimber(Span<TreeBranch> branchBuffer, uint rootNodeSize)
 {
     public Span<TreeBranch> BranchBuffer { get; } = branchBuffer;
     public byte CurrentDepth { get; private set; }
