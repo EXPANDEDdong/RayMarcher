@@ -21,6 +21,8 @@ public class WorldGrid(SharedApplicationState state) : IWorldGrid
     public int MapDepth { get; private set; }
 
     public Octree Octree { get; private set; }
+    
+    public byte[] Voxels => voxels;
 
     public int Index(int x, int y, int z)
     {
@@ -66,7 +68,7 @@ public class WorldGrid(SharedApplicationState state) : IWorldGrid
             idx++;
         }
 
-        const float noiseFrequency = 0.03f;
+        const float noiseFrequency = 0.09f;
 
         var settings = new NoiseSettings(noiseFrequency, noiseFrequency, state.Seed);
         Noise.GradientNoise2D(xCoords, zCoords, noise, settings);
@@ -85,11 +87,24 @@ public class WorldGrid(SharedApplicationState state) : IWorldGrid
             for (var y = 0; y < MapHeight; y++)
             {
                 var solid = y <= groundHeight;
-                var ground = y == groundHeight;
+                var surface = y == groundHeight;
+                var underGround = y < (groundHeight - 5);
+                
+                int material = 0;
+                
+                if (surface)
+                {
+                    material = 2;
+                } else if (underGround)
+                {
+                    material = 3;
+                }
+                else
+                {
+                    material = 1;
+                }
 
-                if (x == 0 || x == MapWidth - 1 || z == 0 || z == MapDepth - 1) voxels[Index(x, y, z)] = 3;
-
-                if (solid) voxels[Index(x, y, z)] = (byte)(ground ? 2 : 1);
+                if (solid) voxels[Index(x, y, z)] = (byte)material;
             }
         }
     }

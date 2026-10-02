@@ -25,4 +25,8 @@
       <Folder Include="Systems\Engines\" />
     </ItemGroup>
 
+    <ItemGroup>
+        <None Update="Shaders\**" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
 </Project>

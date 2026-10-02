@@ -45,8 +45,8 @@ public sealed class PlayerController(
         var fY = (float)Math.Sin(_pitch);
         var fZ = (float)(Math.Cos(_pitch) * Math.Cos(_yaw));
         var forward = new Vector3(fX, fY, fZ);
-        var right = Vector3.Cross(forward, Vector3.UnitY);
-        var up = Vector3.Cross(right, forward);
+        var right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
+        var up = Vector3.Normalize(Vector3.Cross(right, forward));
 
         cameraStateWriter.PushOrthonormal(new OrthonormalBasis(up, right, forward));
     }
@@ -57,6 +57,7 @@ public sealed class PlayerController(
         var (orthonormal, cameraPosition) = cameraStateReader.GetCameraState();
 
         var forward = orthonormal.Forward;
+        var right = orthonormal.Right;
         var mouseDelta = Raylib.GetMouseDelta();
         _yaw -= mouseDelta.X * 0.01f;
         _pitch -= mouseDelta.Y * 0.01f;
@@ -80,12 +81,18 @@ public sealed class PlayerController(
 
         if (Raylib.IsKeyDown(KeyboardKey.A))
         {
-            // TODO: strafe left
+            var next = _position - right * (MoveSpeed * dt);
+            if (!world.IsSolid((int)next.X, (int)_position.Y, (int)_position.Z)) _position.X = next.X;
+            if (!world.IsSolid((int)_position.X, (int)next.Y, (int)_position.Z)) _position.Y = next.Y;
+            if (!world.IsSolid((int)_position.X, (int)_position.Y, (int)next.Z)) _position.Z = next.Z;
         }
 
         if (Raylib.IsKeyDown(KeyboardKey.D))
         {
-            // TODO: strafe right
+            var next = _position + right * (MoveSpeed * dt);
+            if (!world.IsSolid((int)next.X, (int)_position.Y, (int)_position.Z)) _position.X = next.X;
+            if (!world.IsSolid((int)_position.X, (int)next.Y, (int)_position.Z)) _position.Y = next.Y;
+            if (!world.IsSolid((int)_position.X, (int)_position.Y, (int)next.Z)) _position.Z = next.Z;
         }
 
         if (Raylib.IsKeyDown(KeyboardKey.Right)) _yaw -= LookSpeed * dt;

@@ -33,6 +33,6 @@ public class SharedApplicationState
     {
         Raylib.InitWindow(WindowWidth, WindowHeight, "RayMarcher");
         Raylib.DisableCursor();
-        Raylib.SetTargetFPS(30);
+        Raylib.SetTargetFPS(60);
     }
 }

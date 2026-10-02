@@ -11,20 +11,93 @@ public class Renderer(SharedApplicationState state, WorldGrid world, ICameraStat
 {
     private Texture2D _frameTexture;
     private Color[] _pixelBuffer = null!;
+    private Shader _shader;
+    private Texture2D _voxelsTexture;
+    private Texture2D _textureAtlas;
+    private int textureAtlasLoc;
+    private int voxelsLoc;
+    private int camPosLoc;
+    private int camForwardLoc;
+    private int camUpLoc;
+    private int camRightLoc;
+    private int resolutionLoc;
+    private int dimensionsLoc;
+    private byte[] paddedVoxels;
 
     private readonly Color[] _textures = [Color.Blank, Color.Brown, Color.Green, Color.SkyBlue];
 
     [SetupMethod(Phase = SetupPhase.Late)]
     public void Setup()
     {
-        _pixelBuffer = new Color[state.RenderWidth * state.RenderHeight];
-        var blankImage = Raylib.GenImageColor(state.RenderWidth, state.RenderHeight, Color.Black);
-        _frameTexture = Raylib.LoadTextureFromImage(blankImage);
-        Raylib.SetTextureFilter(_frameTexture, TextureFilter.Bilinear);
-        Raylib.UnloadImage(blankImage);
+        var totalVoxels = state.MapWidth * state.MapHeight * state.MapDepth;
+        var rows = (int)Math.Ceiling((double)totalVoxels / 4096);
+        paddedVoxels = new byte[rows * 4096];
+        world.Voxels.CopyTo(paddedVoxels);
+        
+        unsafe
+        {
+            fixed (byte* ptr = paddedVoxels)
+            {
+                var img = new Image
+                {
+                    Format = PixelFormat.UncompressedGrayscale,
+                    Width = 4096,
+                    Height = rows,
+                    Mipmaps = 1,
+                    Data = ptr
+                };
+                _voxelsTexture = Raylib.LoadTextureFromImage(img);
+                Raylib.SetTextureFilter(_voxelsTexture, TextureFilter.Point);
+            }
+        }
+
+        var atlas = Raylib.LoadImage("Shaders/atlas16x16.png");
+        _textureAtlas = Raylib.LoadTextureFromImage(atlas);
+        Raylib.SetTextureFilter(_textureAtlas, TextureFilter.Point);
+        Raylib.UnloadImage(atlas);
+        
+        
+        _shader = Raylib.LoadShader(null, "Shaders/raymarch.fs");
+        voxelsLoc = Raylib.GetShaderLocation(_shader, "voxels");
+        camPosLoc = Raylib.GetShaderLocation(_shader, "camPos");
+        camForwardLoc = Raylib.GetShaderLocation(_shader, "camForward");
+        camUpLoc = Raylib.GetShaderLocation(_shader, "camUp");
+        camRightLoc = Raylib.GetShaderLocation(_shader, "camRight");
+        resolutionLoc = Raylib.GetShaderLocation(_shader, "resolution");
+        dimensionsLoc = Raylib.GetShaderLocation(_shader, "dimensions");
+        textureAtlasLoc = Raylib.GetShaderLocation(_shader, "textureAtlas");
+    }
+
+    public void Destroy()
+    {
+        Raylib.UnloadTexture(_voxelsTexture);
+        Raylib.UnloadTexture(_textureAtlas);
+        Raylib.UnloadShader(_shader);
     }
 
     [TickMethod]
+    public void RenderShader()
+    {
+        var (orthonormal, cameraState) = stateReader.GetCameraState();
+        Raylib.SetShaderValue(_shader, camPosLoc, cameraState.Position, ShaderUniformDataType.Vec3);
+        Raylib.SetShaderValue(_shader, camForwardLoc, orthonormal.Forward, ShaderUniformDataType.Vec3);
+        Raylib.SetShaderValue(_shader, camUpLoc, orthonormal.Up, ShaderUniformDataType.Vec3);
+        Raylib.SetShaderValue(_shader, camRightLoc, orthonormal.Right, ShaderUniformDataType.Vec3);
+        Raylib.SetShaderValue(_shader, resolutionLoc, new Vector2(state.WindowWidth, state.WindowHeight), ShaderUniformDataType.Vec2);
+        Raylib.SetShaderValue(_shader, dimensionsLoc, new int[3]{ state.MapWidth, state.MapHeight, state.MapDepth }, ShaderUniformDataType.IVec3);
+        Raylib.SetShaderValueTexture(_shader, textureAtlasLoc, _textureAtlas);
+        
+        Raylib.BeginDrawing();
+            Raylib.BeginShaderMode(_shader);
+            Raylib.SetShaderValueTexture(_shader, textureAtlasLoc, _textureAtlas);
+            Raylib.SetShaderValueTexture(_shader, voxelsLoc, _voxelsTexture);
+                Raylib.DrawRectangle(0, 0, state.WindowWidth, state.WindowHeight, Color.White);
+            Raylib.EndShaderMode();
+            Raylib.DrawFPS(10, 10);
+        Raylib.EndDrawing();
+    }
+
+    /*[TickMethod] Not in use, remains for reference. Will likely be removed in the future. */
     public void Render()
     {
         var (orthonormal, cameraState) = stateReader.GetCameraState();

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Raylib_cs;
 using RayMarcher;
 using RayMarcher.Framework;
+using RayMarcher.Systems;
 using RayMarcher.Systems.States;
 
 GameSettings? settings = StartupDialog.Show();
@@ -25,3 +26,7 @@ while (!Raylib.WindowShouldClose())
 {
     scheduler.Tick(Raylib.GetFrameTime());
 }
+
+var renderer = provider.GetRequiredService<Renderer>();
+renderer.Destroy();
+Raylib.CloseWindow();
